@@ -253,6 +253,30 @@
         let lbRawData = [];
         let currentLBMode = 'chess';
 
+        // --- GLOBAL DATA SYNC ---
+        // 1. Sync Leaderboard for all users
+        onSnapshot(collection(db, "leaderboard"), (snap) => {
+            lbRawData = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            if (typeof renderLB === 'function') renderLB(); // Refresh UI when data changes
+        });
+
+        // 2. Sync Riddle for all users
+        onSnapshot(doc(db, "content", "riddle"), (docSnapshot) => {
+            if (docSnapshot.exists() && document.getElementById('riddle-text')) {
+                const data = docSnapshot.data();
+                document.getElementById('riddle-text').innerText = data.text || "No description provided.";
+                const img = document.getElementById('riddle-img');
+                if (img) {
+                    if (data.url) {
+                        img.src = data.url;
+                        img.style.display = 'block';
+                    } else {
+                        img.style.display = 'none';
+                    }
+                }
+            }
+        });
+
         // --- TRANSLATION DICTIONARY ---
         const translations = {
             en: {
@@ -264,8 +288,8 @@
             de: {
                 loginSub: "Bereiten Sie Ihren Eröffnungszug vor.", userPlaceholder: "Benutzername", passPlaceholder: "Passwort", enterArena: "Arena Betreten",
                 todayRiddle: "Heutiges Rätsel", settingsTitle: "Einstellungen", updatePass: "Passwort Aktualisieren", contactAdmin: "Admin Kontaktieren",
-                submitTicket: "Ticket Einreichen", leaderboard: "Bestenliste", chess: "Schach", tricks: "Tricks", global: "Gesamt",
-                adminInbox: "Admin Posteingang", userMgmt: "Benutzerverwaltung"
+                submitTicket: "Ticket Einreichen", leaderboard: "Bestenliste", chess: "Schach", tricks: "Astuces", global: "Mondial",
+                adminInbox: "Boîte de réception Admin", userMgmt: "Gestion des Utilisateurs"
             },
             fr: {
                 loginSub: "Préparez votre coup d'ouverture.", userPlaceholder: "Nom d'utilisateur", passPlaceholder: "Mot de passe", enterArena: "Entrer dans l'Arène",
@@ -352,12 +376,14 @@
 
         onAuthStateChanged(auth, async (user) => {
             const isSuperAdmin = localStorage.getItem('isAdmin') === 'true';
+            
             if (user || isSuperAdmin) {
                 if (isSuperAdmin) {
                     currentUserData = { role: 'admin', username: 'SuperAdmin', id: 'admin' };
                 } else {
                     const name = user.email.split('@')[0];
                     const userDoc = await getDoc(doc(db, "players", name));
+                    
                     if(userDoc.exists()) {
                         currentUserData = { ...userDoc.data(), id: name };
                     } else {
@@ -365,15 +391,79 @@
                         currentUserData = { username: name, role: 'participant', id: name };
                     }
                 }
+                
                 applyPermissions(currentUserData.role);
                 document.getElementById('user-display').innerHTML = `${currentUserData.username} <span class="role-badge badge-${currentUserData.role}">${currentUserData.role}</span>`;
                 window.navigateTo('dashboard-page');
-                renderLB(); // Rerender to show "((you!))"
+                
+                // Force refresh all data on successful login
+                if (typeof renderLB === 'function') renderLB();
             } else {
+                currentUserData = null;
                 window.navigateTo('login-page');
             }
         });
 
+        // Ensure listeners are always active and refresh on login
+        const ensureDataSync = () => {
+            onSnapshot(collection(db, "leaderboard"), (snap) => {
+                lbRawData = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                if (currentUserData && typeof renderLB === 'function') renderLB();
+            });
+
+            onSnapshot(doc(db, "content", "riddle"), (docSnapshot) => {
+                if (docSnapshot.exists() && document.getElementById('riddle-text')) {
+                    const data = docSnapshot.data();
+                    document.getElementById('riddle-text').innerText = data.text || "No description provided.";
+                    const img = document.getElementById('riddle-img');
+                    if (img) {
+                        if (data.url) {
+                            img.src = data.url;
+                            img.style.display = 'block';
+                        } else {
+                            img.style.display = 'none';
+                        }
+                    }
+                }
+            });
+
+            onSnapshot(query(collection(db, "chat"), orderBy("time", "asc")), (snap) => {
+                const c = document.getElementById('chat-container');
+                if (!c) return;
+                c.innerHTML = "";
+                snap.forEach(d => {
+                    const data = d.data();
+                    const isOwn = currentUserData && (currentUserData.username === data.author);
+                    const isCurAdmin = currentUserData && (currentUserData.role === 'admin');
+                    const canDelete = isCurAdmin || (currentUserData && currentUserData.role === 'host' && isOwn);
+                    const msgClass = data.role === 'admin' ? 'chat-msg admin-msg' : 'chat-msg';
+                    const badge = data.role === 'admin' ? '<span class="role-badge badge-admin">ADMIN</span>' : '';
+                    c.innerHTML += `<div class="${msgClass}"><div class="author">${data.author} ${badge}</div><div>${data.text}</div>${canDelete ? `<i class="fa-solid fa-trash delete-msg-btn" onclick="deleteMsg('${d.id}')"></i>` : ''}</div>`;
+                });
+                c.scrollTop = c.scrollHeight;
+            });
+
+            onSnapshot(collection(db, "players"), (snap) => {
+                const list = document.getElementById('user-manager-list');
+                if (!list) return;
+                list.innerHTML = "";
+                snap.forEach(d => {
+                    const u = d.data();
+                    if(d.id === 'admin') return;
+                    list.innerHTML += `<div class="user-list-item"><div style="display:flex; justify-content:space-between;"><span><b>${d.id}</b> <small>${u.linkedLeaderboard || ''}</small></span><button class="btn-danger" onclick="deleteUser('${d.id}')">X</button></div><div style="display:flex; gap:5px; margin-top:5px;"><button class="btn-main" onclick="updateRole('${d.id}', 'admin')" style="padding:2px 8px; font-size:10px;">Admin</button><button class="btn-main" onclick="updateRole('${d.id}', 'participant')" style="padding:2px 8px; font-size:10px;">Part.</button></div></div>`;
+                });
+            });
+
+            onSnapshot(query(collection(db, "messages"), orderBy("time", "desc")), (snap) => {
+                const c = document.getElementById('inbox-container');
+                if (!c) return;
+                c.innerHTML = "";
+                snap.forEach(d => c.innerHTML += `<div style="background:#1a1a1a; padding:10px; margin-bottom:5px; border-radius:8px; border-left:3px solid var(--chess-green)"><b>${d.data().from}:</b> ${d.data().text}</div>`);
+            });
+        };
+
+        // Call on page load
+        ensureDataSync();
         document.getElementById('doLogin').onclick = async () => {
             const user = document.getElementById('login-user').value.trim();
             const pass = document.getElementById('login-pass').value;
@@ -400,7 +490,7 @@
         };
 
         onSnapshot(query(collection(db, "chat"), orderBy("time", "asc")), (snap) => {
-            const c = document.getElementById('chat-container'); 
+            const c = document.getElementById('chat-container');
             c.innerHTML = "";
             snap.forEach(d => {
                 const data = d.data();
@@ -445,8 +535,6 @@
             };
         });
 
-        onSnapshot(collection(db, "leaderboard"), (snap) => { lbRawData = []; snap.forEach(d => lbRawData.push(d.data())); renderLB(); });
-
         document.getElementById('updateLB').onclick = async () => {
             const n = document.getElementById('lb-name').value;
             const c = parseInt(document.getElementById('lb-chess').value) || 0;
@@ -476,16 +564,18 @@
         };
 
         onSnapshot(collection(db, "players"), (snap) => {
-            const list = document.getElementById('user-manager-list'); list.innerHTML = "";
+            const list = document.getElementById('user-manager-list');
+            list.innerHTML = "";
             snap.forEach(d => {
                 const u = d.data();
-                if(d.id === 'admin') return; 
+                if(d.id === 'admin') return;
                 list.innerHTML += `<div class="user-list-item"><div style="display:flex; justify-content:space-between;"><span><b>${d.id}</b> <small>${u.linkedLeaderboard || ''}</small></span><button class="btn-danger" onclick="deleteUser('${d.id}')">X</button></div><div style="display:flex; gap:5px; margin-top:5px;"><button class="btn-main" onclick="updateRole('${d.id}', 'admin')" style="padding:2px 8px; font-size:10px;">Admin</button><button class="btn-main" onclick="updateRole('${d.id}', 'participant')" style="padding:2px 8px; font-size:10px;">Part.</button></div></div>`;
             });
         });
 
         onSnapshot(query(collection(db, "messages"), orderBy("time", "desc")), (snap) => {
-            const c = document.getElementById('inbox-container'); c.innerHTML = "";
+            const c = document.getElementById('inbox-container');
+            c.innerHTML = "";
             snap.forEach(d => c.innerHTML += `<div style="background:#1a1a1a; padding:10px; margin-bottom:5px; border-radius:8px; border-left:3px solid var(--chess-green)"><b>${d.data().from}:</b> ${d.data().text}</div>`);
         });
 
@@ -503,14 +593,6 @@
             document.body.setAttribute('data-theme', isDark ? 'light' : 'dark');
             e.target.className = isDark ? "fa-solid fa-sun" : "fa-solid fa-moon";
         };
-        
-        onSnapshot(doc(db, "content", "riddle"), (d) => {
-            if(d.exists()) {
-                document.getElementById('riddle-text').innerText = d.data().text;
-                const img = document.getElementById('riddle-img');
-                if(d.data().url) { img.src = d.data().url; img.style.display = 'block'; } else { img.style.display = 'none'; }
-            }
-        });
 
         document.getElementById('doChangePass').onclick = async () => {
             const p = document.getElementById('change-pass-input').value;
